@@ -147,12 +147,79 @@ def generate_otp() -> str:
     return f"{secrets.randbelow(1_000_000):06d}"
 
 
+RESEND_API_KEY = os.environ["RESEND_API_KEY"]
+RESEND_FROM_EMAIL = os.environ.get("RESEND_FROM_EMAIL", "Earnicle <onboarding@resend.dev>")
+RESEND_API_URL = "https://api.resend.com/emails"
+
+_OTP_EMAIL_COPY = {
+    "signup": {
+        "subject": "Your Earnicle verification code",
+        "heading": "Please check your email",
+        "sub": "We've sent a code to",
+        "button": "Verify &amp; continue earning",
+        "footer": "This code expires in 10 minutes. If you didn't request this, you can ignore this email.",
+    },
+    "reset": {
+        "subject": "Reset your Earnicle password",
+        "heading": "Reset your password",
+        "sub": "We've sent a code to",
+        "button": "Reset password",
+        "footer": "This code expires in 10 minutes. If you didn't request a password reset, you can safely ignore this email.",
+    },
+}
+
+
+def _otp_email_html(email: str, code: str, purpose: str) -> str:
+    copy = _OTP_EMAIL_COPY[purpose]
+    return f"""
+<div style="font-family: -apple-system, sans-serif; max-width: 400px; margin: 0 auto; padding: 32px 24px; background: #ffffff;">
+  <div style="text-align: center; margin-bottom: 24px;">
+    <span style="display:inline-block; width:32px; height:32px; background:#5B4FE5; border-radius:8px; color:white; font-weight:bold; line-height:32px; font-size:16px;">E</span>
+    <span style="font-size: 20px; font-weight: 700; margin-left: 8px; vertical-align: middle; color:#111;">Earnicle</span>
+  </div>
+
+  <h2 style="text-align: center; font-size: 22px; margin-bottom: 8px; color:#111;">{copy['heading']}</h2>
+  <p style="text-align: center; color: #6B7280; font-size: 14px; margin-bottom: 24px;">
+    {copy['sub']} <strong style="color:#111;">{email}</strong>
+  </p>
+
+  <div style="text-align: center; margin: 24px 0;">
+    <span style="display:inline-block; font-size: 32px; font-weight: 700; letter-spacing: 8px; background: #EDEBFC; padding: 16px 24px; border-radius: 12px; color: #5B4FE5; border: 1px solid #D9D5F9;">
+      {code}
+    </span>
+  </div>
+
+  <div style="text-align:center; margin: 24px 0;">
+    <span style="display:inline-block; background:#5B4FE5; color:white; font-weight:600; font-size:14px; padding:12px 32px; border-radius:12px;">
+      {copy['button']}
+    </span>
+  </div>
+
+  <p style="text-align: center; color: #9CA3AF; font-size: 13px;">
+    {copy['footer']}
+  </p>
+</div>
+""".strip()
+
+
 async def send_otp_email(email: str, code: str, purpose: str):
-    """Plug in your transactional email provider here (Resend, SES, Postmark...).
-    Left as an explicit hook rather than guessed at, since no provider was
-    specified — wire this up before going live."""
-    # e.g. await resend_client.send(to=email, subject=..., html=...)
-    print(f"[dev] OTP for {email} ({purpose}): {code}")
+    """Sends the OTP via Resend, using the same purple-branded template as
+    the rest of the app. Raises if the send fails so a signup/reset request
+    doesn't silently succeed while the user never gets a code."""
+    copy = _OTP_EMAIL_COPY[purpose]
+    async with httpx.AsyncClient() as client:
+        resp = await client.post(
+            RESEND_API_URL,
+            headers={"Authorization": f"Bearer {RESEND_API_KEY}"},
+            json={
+                "from": RESEND_FROM_EMAIL,
+                "to": [email],
+                "subject": copy["subject"],
+                "html": _otp_email_html(email, code, purpose),
+            },
+        )
+    if resp.status_code >= 400:
+        raise HTTPException(status.HTTP_502_BAD_GATEWAY, "Failed to send verification email")
 
 
 async def issue_otp(db: AsyncSession, email: str, purpose: str) -> str:
