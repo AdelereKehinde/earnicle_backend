@@ -22,6 +22,12 @@ engine = create_async_engine(
     pool_pre_ping=True,
     pool_size=10,
     max_overflow=20,
+    # Required when connecting through Supabase's transaction pooler (pgbouncer,
+    # port 6543): pgbouncer in transaction mode doesn't support prepared
+    # statements, but asyncpg uses them by default. Disabling the statement
+    # cache avoids "DuplicatePreparedStatementError". Safe to keep even if you
+    # later switch to a direct/session-pooler connection.
+    connect_args={"statement_cache_size": 0, "prepared_statement_cache_size": 0},
 )
 
 AsyncSessionLocal = async_sessionmaker(

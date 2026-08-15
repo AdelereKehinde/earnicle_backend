@@ -199,13 +199,13 @@ class SavedStory(Base):
 
 
 class OTPCode(Base):
-    """Short-lived OTP codes for signup verification and password reset."""
+    """Short-lived OTP codes for password reset only."""
     __tablename__ = "otp_codes"
 
     id = Column(UUID(as_uuid=True), primary_key=True, default=gen_uuid)
     email = Column(String, nullable=False, index=True)
     code_hash = Column(String, nullable=False)
-    purpose = Column(String, nullable=False)  # 'signup' | 'reset'
+    purpose = Column(String, nullable=False, default="reset")  # only 'reset' is used now
     attempts = Column(Integer, default=0)
     expires_at = Column(DateTime(timezone=True), nullable=False)
     used = Column(Boolean, default=False)

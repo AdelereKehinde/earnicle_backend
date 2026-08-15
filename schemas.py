@@ -3,7 +3,7 @@ schemas.py — Pydantic request/response models.
 """
 from __future__ import annotations
 from datetime import datetime
-from typing import Optional, List, Generic, TypeVar
+from typing import Optional, List, Generic, TypeVar, Literal
 from uuid import UUID
 from decimal import Decimal
 from pydantic import BaseModel, EmailStr, Field, ConfigDict
@@ -36,12 +36,10 @@ class LoginRequest(BaseModel):
 class VerifyOTPRequest(BaseModel):
     email: EmailStr
     code: str = Field(min_length=6, max_length=6)
-    purpose: str = Field(pattern="^(signup|reset)$")
 
 
 class ResendOTPRequest(BaseModel):
     email: EmailStr
-    purpose: str = Field(pattern="^(signup|reset)$")
 
 
 class ForgotPasswordRequest(BaseModel):

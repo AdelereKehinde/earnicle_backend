@@ -1,8 +1,8 @@
 """
 main.py — Earnicle API.
 
-Auth: custom JWT (access + refresh), email OTP for signup/reset (Supabase Auth
-is NOT used — Supabase is the Postgres host only).
+Auth: custom JWT (access + refresh), email OTP for password reset only (Supabase
+Auth is NOT used — Supabase is the Postgres host only). Signup needs no OTP.
 RBAC: 'reader' | 'writer' | 'both' gates on write endpoints.
 Idempotency: Idempotency-Key header required on payment/withdrawal writes.
 Pagination: cursor-based (created_at,id) on every list endpoint.
@@ -19,6 +19,7 @@ from typing import Optional, List
 from uuid import UUID
 
 import httpx
+import logging
 from fastapi import FastAPI, Depends, HTTPException, status, Header, Request
 from fastapi.middleware.cors import CORSMiddleware
 from jose import jwt, JWTError
@@ -152,19 +153,11 @@ RESEND_FROM_EMAIL = os.environ.get("RESEND_FROM_EMAIL", "Earnicle <onboarding@re
 RESEND_API_URL = "https://api.resend.com/emails"
 
 _OTP_EMAIL_COPY = {
-    "signup": {
-        "subject": "Your Earnicle verification code",
-        "heading": "Please check your email",
-        "sub": "We've sent a code to",
-        "button": "Verify &amp; continue earning",
-        "footer": "This code expires in 10 minutes. If you didn't request this, you can ignore this email.",
-    },
     "reset": {
-        "subject": "Reset your Earnicle password",
-        "heading": "Reset your password",
-        "sub": "We've sent a code to",
-        "button": "Reset password",
-        "footer": "This code expires in 10 minutes. If you didn't request a password reset, you can safely ignore this email.",
+        "subject": "Earnicle password reset code",
+        "heading": "Password reset request",
+        
+        "footer": "This code will expire in 10 minutes. If you did not request this, no action is required.",
     },
 }
 
@@ -179,21 +172,11 @@ def _otp_email_html(email: str, code: str, purpose: str) -> str:
   </div>
 
   <h2 style="text-align: center; font-size: 22px; margin-bottom: 8px; color:#111;">{copy['heading']}</h2>
-  <p style="text-align: center; color: #6B7280; font-size: 14px; margin-bottom: 24px;">
-    {copy['sub']} <strong style="color:#111;">{email}</strong>
-  </p>
-
-  <div style="text-align: center; margin: 24px 0;">
-    <span style="display:inline-block; font-size: 32px; font-weight: 700; letter-spacing: 8px; background: #EDEBFC; padding: 16px 24px; border-radius: 12px; color: #5B4FE5; border: 1px solid #D9D5F9;">
-      {code}
-    </span>
-  </div>
-
-  <div style="text-align:center; margin: 24px 0;">
-    <span style="display:inline-block; background:#5B4FE5; color:white; font-weight:600; font-size:14px; padding:12px 32px; border-radius:12px;">
-      {copy['button']}
-    </span>
-  </div>
+    <div style="text-align: center; margin: 24px 0;">
+        <span style="display:inline-block; font-size: 32px; font-weight: 700; letter-spacing: 8px; background: #EDEBFC; padding: 16px 24px; border-radius: 12px; color: #5B4FE5; border: 1px solid #D9D5F9;">
+            {code}
+        </span>
+    </div>
 
   <p style="text-align: center; color: #9CA3AF; font-size: 13px;">
     {copy['footer']}
@@ -219,6 +202,12 @@ async def send_otp_email(email: str, code: str, purpose: str):
             },
         )
     if resp.status_code >= 400:
+        # Log the failure details for debugging (do not expose secrets to clients)
+        try:
+            body = resp.text
+        except Exception:
+            body = "<could not read response body>"
+        logging.error("Resend API error sending OTP to %s: status=%s body=%s", email, resp.status_code, body)
         raise HTTPException(status.HTTP_502_BAD_GATEWAY, "Failed to send verification email")
 
 
@@ -270,7 +259,7 @@ def encode_cursor(created_at: datetime, id_: UUID) -> str:
     raw = f"{created_at.isoformat()}|{id_}"
     return base64.urlsafe_b64encode(raw.encode()).decode()
 
-
+   
 def decode_cursor(cursor: str) -> tuple[datetime, UUID]:
     try:
         raw = base64.urlsafe_b64decode(cursor.encode()).decode()
@@ -332,8 +321,10 @@ async def push_notification(
 # AUTH
 # ===========================================================================
 
-@app.post("/auth/signup", status_code=201)
+@app.post("/auth/signup", status_code=201, response_model=schemas.TokenResponse)
 async def signup(payload: schemas.SignupRequest, db: AsyncSession = Depends(get_db)):
+    """Create an account directly — no email OTP step. The account is created
+    verified so the user can sign in / use the app immediately."""
     result = await db.execute(select(models.Profile).where(models.Profile.email == payload.email))
     if result.scalar_one_or_none():
         raise HTTPException(status.HTTP_409_CONFLICT, "Email already registered")
@@ -343,34 +334,31 @@ async def signup(payload: schemas.SignupRequest, db: AsyncSession = Depends(get_
         hashed_password=hash_password(payload.password),
         full_name=payload.full_name,
         role=models.RoleEnum.reader,
+        is_email_verified=True,
     )
     db.add(user)
     await db.commit()
-    await issue_otp(db, payload.email, "signup")
-    return {"message": "Verification code sent"}
+    return create_token_pair(str(user.id))
 
 
 @app.post("/auth/verify-otp", response_model=schemas.TokenResponse)
-async def verify_signup_otp(payload: schemas.VerifyOTPRequest, db: AsyncSession = Depends(get_db)):
-    ok = await verify_otp(db, payload.email, payload.code, payload.purpose)
+async def verify_otp_endpoint(payload: schemas.VerifyOTPRequest, db: AsyncSession = Depends(get_db)):
+    """Verify a password-reset OTP and return a short-lived reset token that
+    can be exchanged at /auth/reset-password. (OTP is only used for password
+    reset now — signup no longer emails a code.)"""
+    ok = await verify_otp(db, payload.email, payload.code, "reset")
     if not ok:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "Invalid or expired code")
-
-    if payload.purpose == "signup":
-        result = await db.execute(select(models.Profile).where(models.Profile.email == payload.email))
-        user = result.scalar_one()
-        user.is_email_verified = True
-        await db.commit()
-        return create_token_pair(str(user.id))
-
-    # purpose == "reset": issue a short-lived reset token instead of full login
     reset_token = create_token(payload.email, timedelta(minutes=15), "reset")
     return schemas.TokenResponse(access_token=reset_token, refresh_token="", token_type="reset")
 
 
+
+
+
 @app.post("/auth/resend-otp")
 async def resend_otp(payload: schemas.ResendOTPRequest, db: AsyncSession = Depends(get_db)):
-    await issue_otp(db, payload.email, payload.purpose)
+    await issue_otp(db, payload.email, "reset")
     return {"message": "Code resent"}
 
 
@@ -408,17 +396,28 @@ async def forgot_password(payload: schemas.ForgotPasswordRequest, db: AsyncSessi
 
 @app.post("/auth/reset-password")
 async def reset_password(payload: schemas.ResetPasswordRequest, db: AsyncSession = Depends(get_db)):
-    try:
-        decoded = jwt.decode(payload.reset_token, JWT_SECRET, algorithms=[JWT_ALGORITHM])
-        if decoded.get("type") != "reset" or decoded.get("sub") != payload.email:
-            raise HTTPException(status.HTTP_400_BAD_REQUEST, "Invalid reset token")
-    except JWTError:
-        raise HTTPException(status.HTTP_400_BAD_REQUEST, "Invalid or expired reset token")
-
     result = await db.execute(select(models.Profile).where(models.Profile.email == payload.email))
     user = result.scalar_one_or_none()
     if not user:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "User not found")
+
+    # `reset_token` can be either the short-lived JWT returned by
+    # /auth/verify-otp, OR the raw 6-digit OTP sent to the user's email.
+    # Accept both so the app doesn't have to round-trip a JWT.
+    token_ok = False
+    try:
+        decoded = jwt.decode(payload.reset_token, JWT_SECRET, algorithms=[JWT_ALGORITHM])
+        if decoded.get("type") == "reset" and decoded.get("sub") == payload.email:
+            token_ok = True
+    except JWTError:
+        pass
+
+    if not token_ok:
+        token_ok = await verify_otp(db, payload.email, payload.reset_token, "reset")
+
+    if not token_ok:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "Invalid or expired reset token")
+
     user.hashed_password = hash_password(payload.new_password)
     await db.commit()
     return {"message": "Password updated"}
