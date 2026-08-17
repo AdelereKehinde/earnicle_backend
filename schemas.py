@@ -84,6 +84,7 @@ class ProfileOut(BaseModel):
     is_writer: bool
     is_top_writer: bool
     is_pro_member: bool
+    last_login: Optional[datetime]
     created_at: datetime
 
 

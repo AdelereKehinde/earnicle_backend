@@ -83,6 +83,7 @@ class Profile(Base):
     is_top_writer = Column(Boolean, default=False)
     is_pro_member = Column(Boolean, default=False)
     is_email_verified = Column(Boolean, default=False)
+    last_login = Column(DateTime(timezone=True), nullable=True)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
 

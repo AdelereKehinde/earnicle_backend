@@ -156,14 +156,35 @@ _OTP_EMAIL_COPY = {
     "reset": {
         "subject": "Earnicle password reset code",
         "heading": "Password reset request",
-        
+
         "footer": "This code will expire in 10 minutes. If you did not request this, no action is required.",
     },
 }
 
+_WELCOME_EMAIL_COPY = {
+    "subject": "Welcome to Earnicle!",
+    "heading": "Welcome to Earnicle",
+    "intro": "Hi {name} — your account is ready. Here's what you can do:",
+    "features": [
+        ("Read & earn", "Finish articles to earn small rewards straight into your wallet."),
+        ("Write & publish", "Share stories and shorts, then earn whenever readers unlock them."),
+        ("Follow authors", "Keep up with the writers you love and never miss a post."),
+        ("Build your library", "Save stories and pick up where you left off anytime."),
+        ("Withdraw anytime", "Cash out your earnings whenever you're ready."),
+    ],
+    "footer": "We're thrilled to have you on board. Happy reading!",
+}
 
-def _otp_email_html(email: str, code: str, purpose: str) -> str:
-    copy = _OTP_EMAIL_COPY[purpose]
+_LOGIN_ALERT_COPY = {
+    "subject": "New sign-in to your Earnicle account",
+    "heading": "New sign-in detected",
+    "body": "Hi {name}, we noticed a new sign-in to your Earnicle account.",
+    "footer": "If this was you, you can safely ignore this email. If it wasn't, change your password right away.",
+}
+
+
+def _brand_email_html(heading: str, body_html: str) -> str:
+    """Shared purple-branded email shell used by every transactional email."""
     return f"""
 <div style="font-family: -apple-system, sans-serif; max-width: 400px; margin: 0 auto; padding: 32px 24px; background: #ffffff;">
   <div style="text-align: center; margin-bottom: 24px;">
@@ -171,35 +192,72 @@ def _otp_email_html(email: str, code: str, purpose: str) -> str:
     <span style="font-size: 20px; font-weight: 700; margin-left: 8px; vertical-align: middle; color:#111;">Earnicle</span>
   </div>
 
-  <h2 style="text-align: center; font-size: 22px; margin-bottom: 8px; color:#111;">{copy['heading']}</h2>
-    <div style="text-align: center; margin: 24px 0;">
-        <span style="display:inline-block; font-size: 32px; font-weight: 700; letter-spacing: 8px; background: #EDEBFC; padding: 16px 24px; border-radius: 12px; color: #5B4FE5; border: 1px solid #D9D5F9;">
-            {code}
-        </span>
-    </div>
-
-  <p style="text-align: center; color: #9CA3AF; font-size: 13px;">
-    {copy['footer']}
-  </p>
+  <h2 style="text-align: center; font-size: 22px; margin-bottom: 8px; color:#111;">{heading}</h2>
+  {body_html}
 </div>
 """.strip()
 
 
-async def send_otp_email(email: str, code: str, purpose: str):
-    """Sends the OTP via Resend, using the same purple-branded template as
-    the rest of the app. Raises if the send fails so a signup/reset request
-    doesn't silently succeed while the user never gets a code."""
+def _otp_email_html(email: str, code: str, purpose: str) -> str:
     copy = _OTP_EMAIL_COPY[purpose]
+    body = f"""
+  <div style="text-align: center; margin: 24px 0;">
+    <span style="display:inline-block; font-size: 32px; font-weight: 700; letter-spacing: 8px; background: #EDEBFC; padding: 16px 24px; border-radius: 12px; color: #5B4FE5; border: 1px solid #D9D5F9;">
+      {code}
+    </span>
+  </div>
+  <p style="text-align: center; color: #9CA3AF; font-size: 13px;">
+    {copy['footer']}
+  </p>
+""".strip()
+    return _brand_email_html(copy["heading"], body)
+
+
+def _welcome_email_html(name: str) -> str:
+    copy = _WELCOME_EMAIL_COPY
+    features = "".join(
+        f"""
+  <div style="padding: 12px 0; border-bottom: 1px solid #F3F4F6;">
+    <p style="margin: 0; color:#111; font-weight:600; font-size:14px;">{title}</p>
+    <p style="margin: 2px 0 0; color:#6B7280; font-size:13px; line-height:1.5;">{desc}</p>
+  </div>
+""".strip()
+        for title, desc in copy["features"]
+    )
+    body = f"""
+  <p style="color:#374151; font-size:14px; line-height:1.6;">{copy['intro'].format(name=name or 'there')}</p>
+  {features}
+  <p style="text-align: center; color: #9CA3AF; font-size: 13px; margin-top: 20px;">
+    {copy['footer']}
+  </p>
+""".strip()
+    return _brand_email_html(copy["heading"], body)
+
+
+def _login_alert_html(name: str) -> str:
+    copy = _LOGIN_ALERT_COPY
+    body = f"""
+  <p style="color:#374151; font-size:14px; line-height:1.6; text-align:center;">{copy['body'].format(name=name or 'there')}</p>
+  <div style="text-align: center; margin: 20px 0;">
+    <span style="display:inline-block; background:#FEF2F2; color:#B91C1C; padding: 8px 16px; border-radius: 8px; font-size: 13px; font-weight:600;">
+      {datetime.now(timezone.utc).strftime('%B %d, %Y at %H:%M UTC')}
+    </span>
+  </div>
+  <p style="text-align: center; color: #9CA3AF; font-size: 13px;">
+    {copy['footer']}
+  </p>
+""".strip()
+    return _brand_email_html(copy["heading"], body)
+
+
+async def _send_resend_email(email: str, subject: str, html: str):
+    """POST to Resend. Raises HTTP 502 on failure so critical emails (like
+    OTP codes) never silently fail."""
     async with httpx.AsyncClient() as client:
         resp = await client.post(
             RESEND_API_URL,
             headers={"Authorization": f"Bearer {RESEND_API_KEY}"},
-            json={
-                "from": RESEND_FROM_EMAIL,
-                "to": [email],
-                "subject": copy["subject"],
-                "html": _otp_email_html(email, code, purpose),
-            },
+            json={"from": RESEND_FROM_EMAIL, "to": [email], "subject": subject, "html": html},
         )
     if resp.status_code >= 400:
         # Log the failure details for debugging (do not expose secrets to clients)
@@ -207,8 +265,28 @@ async def send_otp_email(email: str, code: str, purpose: str):
             body = resp.text
         except Exception:
             body = "<could not read response body>"
-        logging.error("Resend API error sending OTP to %s: status=%s body=%s", email, resp.status_code, body)
-        raise HTTPException(status.HTTP_502_BAD_GATEWAY, "Failed to send verification email")
+        logging.error("Resend API error to %s: status=%s body=%s", email, resp.status_code, body)
+        raise HTTPException(status.HTTP_502_BAD_GATEWAY, "Failed to send email")
+
+
+async def send_otp_email(email: str, code: str, purpose: str):
+    """Sends the OTP via Resend, using the same purple-branded template as
+    the rest of the app. Raises if the send fails so a reset request
+    doesn't silently succeed while the user never gets a code."""
+    copy = _OTP_EMAIL_COPY[purpose]
+    await _send_resend_email(email, copy["subject"], _otp_email_html(email, code, purpose))
+
+
+async def send_welcome_email(email: str, name: str):
+    """Sends the post-signup welcome email describing what the user can do."""
+    copy = _WELCOME_EMAIL_COPY
+    await _send_resend_email(email, copy["subject"], _welcome_email_html(name))
+
+
+async def send_login_alert_email(email: str, name: str):
+    """Sends a security alert whenever a successful login is detected."""
+    copy = _LOGIN_ALERT_COPY
+    await _send_resend_email(email, copy["subject"], _login_alert_html(name))
 
 
 async def issue_otp(db: AsyncSession, email: str, purpose: str) -> str:
@@ -338,6 +416,11 @@ async def signup(payload: schemas.SignupRequest, db: AsyncSession = Depends(get_
     )
     db.add(user)
     await db.commit()
+    try:
+        await send_welcome_email(user.email, user.full_name)
+    except Exception:
+        # A failed welcome email must never block signup — the account is live.
+        logging.exception("Welcome email failed for %s", user.email)
     return create_token_pair(str(user.id))
 
 
@@ -370,6 +453,13 @@ async def login(payload: schemas.LoginRequest, db: AsyncSession = Depends(get_db
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Invalid email or password")
     if not user.is_email_verified:
         raise HTTPException(status.HTTP_403_FORBIDDEN, "Email not verified")
+    user.last_login = datetime.now(timezone.utc)
+    await db.commit()
+    try:
+        await send_login_alert_email(user.email, user.full_name)
+    except Exception:
+        # A failed login alert must never block sign-in.
+        logging.exception("Login alert email failed for %s", user.email)
     return create_token_pair(str(user.id))
 
 
